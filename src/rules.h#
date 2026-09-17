@@ -1,0 +1,190 @@
+pub struct Rule is
+    pub nr:     int
+    pub action: int
+end
+
+pub fn new_rules() -> [Rule] is
+    return []
+end
+
+;; ── builders ──────────────────────────────────────────────────────────
+;; A name `number()`/`number_x86_64()` can't resolve (a typo) resolves
+;; to -1 and is silently skipped here — never silently turned into
+;; "allow/deny everything", and never crashes the build. Use
+;; `validate_rules` if you want that skip surfaced as a warning instead
+;; of silent.
+
+pub fn allow(rules: [Rule], name: string) -> [Rule] is
+    return allow_nr(rules, number(name))
+end
+
+pub fn allow_nr(rules: [Rule], nr: int) -> [Rule] is
+    let mut r: [Rule] = rules
+    if nr >= 0 is
+        r.push(Rule { nr: nr, action: ACTION_ALLOW })
+    end
+    return r
+end
+
+;; Arch-aware variants — resolve `name` against `arch`'s own syscall
+;; table (syscalls.h#) instead of always defaulting to x86_64. Needed
+;; when building a filter for `ARCH_AARCH64` (or a
+;; `build_program_multi_arch` filter spanning more than one table).
+pub fn allow_arch(rules: [Rule], name: string, arch: int) -> [Rule] is
+    return allow_nr(rules, number_for_arch(name, arch))
+end
+
+pub fn deny_errno(rules: [Rule], name: string, err: int) -> [Rule] is
+    return deny_errno_nr(rules, number(name), err)
+end
+
+pub fn deny_errno_arch(rules: [Rule], name: string, err: int, arch: int) -> [Rule] is
+    return deny_errno_nr(rules, number_for_arch(name, arch), err)
+end
+
+pub fn deny_errno_nr(rules: [Rule], nr: int, err: int) -> [Rule] is
+    let mut r: [Rule] = rules
+    if nr >= 0 is
+        r.push(Rule { nr: nr, action: action_errno(err) })
+    end
+    return r
+end
+
+pub fn deny_kill(rules: [Rule], name: string) -> [Rule] is
+    let mut r: [Rule] = rules
+    let nr: int = number(name)
+    if nr >= 0 is
+        r.push(Rule { nr: nr, action: ACTION_KILL_PROCESS })
+    end
+    return r
+end
+
+pub fn deny_trap(rules: [Rule], name: string) -> [Rule] is
+    let mut r: [Rule] = rules
+    let nr: int = number(name)
+    if nr >= 0 is
+        r.push(Rule { nr: nr, action: ACTION_TRAP })
+    end
+    return r
+end
+
+pub fn deny_log(rules: [Rule], name: string) -> [Rule] is
+    let mut r: [Rule] = rules
+    let nr: int = number(name)
+    if nr >= 0 is
+        r.push(Rule { nr: nr, action: ACTION_LOG })
+    end
+    return r
+end
+
+;; A practical starting allowlist for an ordinary dynamically-linked CLI
+;; program (I/O, memory, basic process/signal handling, TLS setup). Meant
+;; to be a *base* — add whatever the specific program also needs (network
+;; syscalls, `openat` variants, etc.) on top, then install with
+;; `ACTION_KILL_PROCESS` as the default action.
+pub fn allow_baseline(rules: [Rule]) -> [Rule] is
+    let mut r: [Rule] = rules
+    r = allow(r, "read")
+    r = allow(r, "write")
+    r = allow(r, "close")
+    r = allow(r, "fstat")
+    r = allow(r, "lseek")
+    r = allow(r, "mmap")
+    r = allow(r, "mprotect")
+    r = allow(r, "munmap")
+    r = allow(r, "brk")
+    r = allow(r, "rt_sigaction")
+    r = allow(r, "rt_sigprocmask")
+    r = allow(r, "rt_sigreturn")
+    r = allow(r, "sigaltstack")
+    r = allow(r, "ioctl")
+    r = allow(r, "access")
+    r = allow(r, "openat")
+    r = allow(r, "pread64")
+    r = allow(r, "pwrite64")
+    r = allow(r, "newfstatat")
+    r = allow(r, "statx")
+    r = allow(r, "getrandom")
+    r = allow(r, "arch_prctl")
+    r = allow(r, "set_tid_address")
+    r = allow(r, "set_robust_list")
+    r = allow(r, "rseq")
+    r = allow(r, "prlimit64")
+    r = allow(r, "futex")
+    r = allow(r, "clock_gettime")
+    r = allow(r, "gettimeofday")
+    r = allow(r, "getpid")
+    r = allow(r, "gettid")
+    r = allow(r, "exit")
+    r = allow(r, "exit_group")
+    return r
+end
+
+;; ── validation ────────────────────────────────────────────────────────
+;; Returns a human-readable warning for every problem found; an empty
+;; list means the rule set is clean. Purely advisory — `install`/
+;; `build_program` never call this themselves, since a "duplicate rule"
+;; is still perfectly valid BPF (just redundant) and refusing to install
+;; over it would be surprising. Call it yourself before `install` if you
+;; want typos and accidental conflicts caught at build time instead of
+;; discovered the hard way at runtime.
+pub fn validate_rules(rules: [Rule]) -> [string] is
+    let mut warnings: [string] = []
+    let mut i: int = 0
+    while i < rules.len() is
+        if rules[i].nr < 0 is
+            warnings.push(
+                "rule at index " + to_string(i) +
+                " has a negative syscall number (nr=" + to_string(rules[i].nr) +
+                ") — an unresolved name slipped through instead of being skipped"
+            )
+        end
+        let mut j: int = i + 1
+        while j < rules.len() is
+            if rules[i].nr == rules[j].nr is
+                if rules[i].action != rules[j].action is
+                    warnings.push(
+                        "conflicting rules for syscall nr=" + to_string(rules[i].nr) +
+                        ": action " + to_string(rules[i].action) + " at index " + to_string(i) +
+                        " vs action " + to_string(rules[j].action) + " at index " + to_string(j) +
+                        " — build_program's linear scan keeps the FIRST match, the second is dead code"
+                    )
+                else is
+                    warnings.push(
+                        "duplicate rule for syscall nr=" + to_string(rules[i].nr) +
+                        " at indices " + to_string(i) + " and " + to_string(j) +
+                        " (same action — harmless, just redundant)"
+                    )
+                end
+            end
+            j += 1
+        end
+        i += 1
+    end
+    return warnings
+end
+
+;; Drop every rule after the first one seen for a given syscall number
+;; (first-wins, matching `build_program`'s own linear-scan semantics).
+;; Handy before `build_program_bsearch`, where duplicates cost tree
+;; nodes instead of just being dead code.
+pub fn dedupe_rules(rules: [Rule]) -> [Rule] is
+    let mut out: [Rule] = []
+    let mut i: int = 0
+    while i < rules.len() is
+        let mut seen: bool = false
+        let mut j: int = 0
+        while j < out.len() is
+            if out[j].nr == rules[i].nr is
+                seen = true
+                break
+            end
+            j += 1
+        end
+        if !seen is
+            out.push(rules[i])
+        end
+        i += 1
+    end
+    return out
+end
