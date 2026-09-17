@@ -1,0 +1,162 @@
+pub fn pack_instr(code: int, jt: int, jf: int, k: int) -> int is
+    let c:  int = code & 0xFFFF
+    let a:  int = jt   & 0xFF
+    let b:  int = jf   & 0xFF
+    let kk: int = k    & 0xFFFFFFFF
+    return c | (a << 16) | (b << 24) | (kk << 32)
+end
+
+;; ── linear scan (the original, simplest-possible builder) ───────────────
+;; Assemble the full instruction list for `rules` + `default_action`,
+;; checked against `arch`:
+;;   0: load seccomp_data.arch
+;;   1: if arch != <arch>            -> kill the process outright
+;;   2: load seccomp_data.nr
+;;   3..: for each rule, "if nr == rule.nr, return rule.action" — encoded
+;;        as (jt=0 fall into the RET, jf=1 skip it) so every jump is 0 or
+;;        1 regardless of how many rules there are, never hitting
+;;        classic BPF's 255-instruction max-jump limit. This also means
+;;        it never needs `ir.h#`'s general jump-patching machinery.
+;;   last: return default_action
+pub fn build_program(rules: [Rule], default_action: int, arch: int) -> [int] is
+    let mut prog: [int] = []
+    prog.push(pack_instr(OP_LD_W_ABS, 0, 0, OFF_ARCH))
+    prog.push(pack_instr(OP_JEQ_K,    1, 0, arch))
+    prog.push(pack_instr(OP_RET_K,    0, 0, ACTION_KILL_PROCESS))
+    prog.push(pack_instr(OP_LD_W_ABS, 0, 0, OFF_NR))
+    let mut i: int = 0
+    while i < rules.len() is
+        let r: Rule = rules[i]
+        prog.push(pack_instr(OP_JEQ_K, 0, 1, r.nr))
+        prog.push(pack_instr(OP_RET_K, 0, 0, r.action))
+        i += 1
+    end
+    prog.push(pack_instr(OP_RET_K, 0, 0, default_action))
+    return prog
+end
+
+;; ── multi-arch (one filter that accepts several ABIs) ────────────────────
+;; Same as `build_program`, but ALLOWS the syscall-number check to run
+;; for any of `arches` instead of killing on anything but one fixed
+;; architecture. Real-world use: a process that's still reachable
+;; through both its native ABI and a 32-bit compat ABI (or x86_64 +
+;; x32) and needs one filter valid for both, the way libseccomp's
+;; multi-arch filters work.
+pub fn build_program_multi_arch(rules: [Rule], default_action: int, arches: [int]) -> [int] is
+    let mut prog: [int] = []
+    prog.push(pack_instr(OP_LD_W_ABS, 0, 0, OFF_ARCH))
+    let n: int = arches.len()
+    let mut i: int = 0
+    while i < n is
+        ;; jt: skip every remaining arch check AND the kill-RET, landing
+        ;; exactly on the nr-load below.
+        let jt: int = n - i
+        prog.push(pack_instr(OP_JEQ_K, jt, 0, arches[i]))
+        i += 1
+    end
+    prog.push(pack_instr(OP_RET_K, 0, 0, ACTION_KILL_PROCESS))
+    prog.push(pack_instr(OP_LD_W_ABS, 0, 0, OFF_NR))
+    let mut j: int = 0
+    while j < rules.len() is
+        let r: Rule = rules[j]
+        prog.push(pack_instr(OP_JEQ_K, 0, 1, r.nr))
+        prog.push(pack_instr(OP_RET_K, 0, 0, r.action))
+        j += 1
+    end
+    prog.push(pack_instr(OP_RET_K, 0, 0, default_action))
+    return prog
+end
+
+;; ── binary-search dispatch (for large rule sets) ─────────────────────────
+;; `build_program`'s linear chain is O(n) worst case per syscall, but
+;; every jump it emits is a fixed 0/1 — provably never hitting the
+;; 255-instruction jump-offset cap no matter how large `rules` gets, and
+;; simple enough to eyeball-verify, which is why it stays the default.
+;; This is the opt-in alternative for large rule sets: sort by syscall
+;; number and dispatch with a binary-search tree of `BPF_JGE` branches,
+;; O(log n) average comparisons per syscall instead of O(n). Far jumps
+;; (a subtree bigger than 255 instructions) are handled with the
+;; standard "short conditional jump over a long unconditional `BPF_JA`"
+;; trick, so this has no tree-size limit either.
+pub fn sort_rules_by_nr(rules: [Rule]) -> [Rule] is
+    let mut out: [Rule] = []
+    let mut i: int = 0
+    while i < rules.len() is
+        out.push(rules[i])
+        i += 1
+    end
+    let mut a: int = 1
+    while a < out.len() is
+        let key: Rule = out[a]
+        let mut b: int = a - 1
+        while b >= 0 is
+            if out[b].nr <= key.nr is
+                break
+            end
+            out[b + 1] = out[b]
+            b -= 1
+        end
+        out[b + 1] = key
+        a += 1
+    end
+    return out
+end
+
+;; Build the dispatch tree for `sorted[lo..hi)` (must already be sorted
+;; ascending by `nr`, `hi > lo`). Assumes `seccomp_data.nr` is already
+;; loaded into the BPF accumulator by the caller (`build_program_bsearch`
+;; loads it once, up front — nothing in this tree ever re-loads, unlike
+;; comparators.h#'s `CondRule` blocks, since a pure nr-dispatch tree
+;; never touches any other field and so never clobbers the accumulator).
+fn build_tree(sorted: [Rule], lo: int, hi: int) -> [int] is
+    if hi - lo <= 1 is
+        let r: Rule = sorted[lo]
+        let mut leaf: [int] = []
+        leaf.push(pack_instr(OP_JEQ_K, 0, 1, r.nr))
+        leaf.push(pack_instr(OP_RET_K, 0, 0, r.action))
+        return leaf
+    end
+    let mid: int = lo + (hi - lo) / 2
+    let mid_nr: int = sorted[mid].nr
+    let left:  [int] = build_tree(sorted, lo, mid)
+    let right: [int] = build_tree(sorted, mid, hi)
+    let mut out: [int] = []
+    ;; nr >= mid_nr  -> fall through into the JA (right subtree)
+    ;; nr <  mid_nr  -> skip the JA, landing on the left subtree
+    out.push(pack_instr(OP_JGE_K, 0, 1, mid_nr))
+    out.push(pack_instr(OP_JA,    0, 0, left.len()))
+    let mut i: int = 0
+    while i < left.len() is
+        out.push(left[i])
+        i += 1
+    end
+    i = 0
+    while i < right.len() is
+        out.push(right[i])
+        i += 1
+    end
+    return out
+end
+
+;; Same contract as `build_program`, but dispatches with the tree above.
+;; `rules` with duplicate `nr` values should be deduplicated first
+;; (`dedupe_rules`, rules.h#) — the tree still produces a *correct*
+;; program with duplicates present, just not a minimal one.
+pub fn build_program_bsearch(rules: [Rule], default_action: int, arch: int) -> [int] is
+    let mut prog: [int] = []
+    prog.push(pack_instr(OP_LD_W_ABS, 0, 0, OFF_ARCH))
+    prog.push(pack_instr(OP_JEQ_K,    1, 0, arch))
+    prog.push(pack_instr(OP_RET_K,    0, 0, ACTION_KILL_PROCESS))
+    prog.push(pack_instr(OP_LD_W_ABS, 0, 0, OFF_NR))
+    let sorted: [Rule] = sort_rules_by_nr(rules)
+    if sorted.len() > 0 is
+        let tree: [int] = build_tree(sorted, 0, sorted.len())
+        let mut i: int = 0
+        while i < tree.len() is
+            prog.push(tree[i])
+            i += 1
+        end
+    end
+    prog.push(pack_instr(OP_RET_K, 0, 0, default_action))
+    return prog
+end
