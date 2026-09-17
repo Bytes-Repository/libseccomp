@@ -1,0 +1,32 @@
+use "bytes -> libseccomp" from "seccomp"
+
+fn main() is
+    let mut rules: [seccomp::CondRule] = []
+
+    ;; baseline, lifted from plain Rules into CondRules with no
+    ;; conditions (rule_to_cond) so they can share one [CondRule] list
+    ;; with the openat rules below.
+    let mut baseline: [seccomp::Rule] = seccomp::allow_baseline(seccomp::new_rules())
+    let mut i: int = 0
+    while i < baseline.len() is
+        rules.push(seccomp::rule_to_cond(baseline[i]))
+        i += 1
+    end
+
+    ;; openat(dirfd, path, flags, mode) — args[2] is the flags word.
+    ;; O_WRONLY=1, O_RDWR=2 (O_ACCMODE=3) — masked_eq(args[2], 0x3, 0)
+    ;; means "the low 2 access-mode bits are exactly 0", i.e. O_RDONLY.
+    let openat_nr: int = seccomp::number("openat")
+    let ro_cond: [seccomp::ArgCond] = [seccomp::masked_eq(2, 0x3, 0)]
+    rules.push(seccomp::cond_rule(openat_nr, seccomp::ACTION_ALLOW, ro_cond))
+    ;; everything else that reaches `openat` (any write-capable open)
+    ;; gets EACCES instead of falling through to KILL_PROCESS.
+    rules.push(seccomp::cond_rule(openat_nr, seccomp::action_errno(seccomp::EACCES), []))
+
+    let ok: bool = seccomp::install_cond(rules, seccomp::ACTION_KILL_PROCESS)
+    if !ok is
+        write("install failed, errno=" + to_string(seccomp::last_errno()))
+    end
+
+    write("read-only-openat sandbox active")
+end
