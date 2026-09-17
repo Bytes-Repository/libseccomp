@@ -1,0 +1,7 @@
+extern static [c] is
+    fn prctl(option: int, arg2: int, arg3: int, arg4: int, arg5: int) -> int
+    fn syscall(nr: int, a1: int, a2: int, a3: int, a4: int, a5: int, a6: int) -> int
+    fn ioctl(fd: int, request: int, arg: int) -> int
+    fn close(fd: int) -> int
+    fn __errno_location() -> int
+end
