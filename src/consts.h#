@@ -1,0 +1,77 @@
+pub const PR_SET_NO_NEW_PRIVS: int = 38
+pub const PR_GET_SECCOMP:      int = 21
+pub const PR_SET_SECCOMP:      int = 22
+pub const SECCOMP_MODE_DISABLED: int = 0
+pub const SECCOMP_MODE_STRICT:   int = 1
+pub const SECCOMP_MODE_FILTER:   int = 2
+
+;; ── seccomp(2) — the syscall itself, distinct from the prctl() above.
+;; Needed only for user-notification filters (`SECCOMP_FILTER_FLAG_
+;; NEW_LISTENER` isn't reachable through prctl at all, only through
+;; the raw syscall). Note these SECCOMP_SET_MODE_* values are a
+;; *different* numbering than SECCOMP_MODE_* above — that's a real
+;; kernel-API wart, not a typo here.
+pub const SYS_seccomp: int = 317   ;; x86_64 syscall number for seccomp(2)
+
+pub const SECCOMP_SET_MODE_STRICT:    int = 0
+pub const SECCOMP_SET_MODE_FILTER:    int = 1
+pub const SECCOMP_GET_ACTION_AVAIL:   int = 2
+pub const SECCOMP_GET_NOTIF_SIZES:    int = 3
+
+pub const SECCOMP_FILTER_FLAG_TSYNC:        int = 1
+pub const SECCOMP_FILTER_FLAG_LOG:          int = 2
+pub const SECCOMP_FILTER_FLAG_SPEC_ALLOW:   int = 4
+pub const SECCOMP_FILTER_FLAG_NEW_LISTENER: int = 8
+pub const SECCOMP_FILTER_FLAG_TSYNC_ESRCH:  int = 16
+
+;; `struct seccomp_data` field byte offsets (what BPF_LD|BPF_W|BPF_ABS
+;; loads read from): `int nr; __u32 arch; __u64 instruction_pointer;
+;; __u64 args[6];` — nr@0, arch@4, args[i]@16+8*i (lo word) /
+;; 20+8*i (hi word, little-endian).
+pub const OFF_NR:   int = 0
+pub const OFF_ARCH: int = 4
+
+;; ── AUDIT_ARCH_* — which syscall ABI a process is really using ──────────
+pub const ARCH_X86_64:  int = 0xC000003E
+pub const ARCH_I386:    int = 0x40000003
+pub const ARCH_AARCH64: int = 0xC00000B7
+pub const ARCH_ARM:     int = 0x40000028
+
+;; ── SECCOMP_RET_* — what a rule / the default action does on match ──────
+;; low 16 bits of ERRNO/TRACE carry a payload — use action_errno()/
+;; action_trace() rather than OR-ing these by hand.
+pub const ACTION_KILL_PROCESS:  int = 0x80000000
+pub const ACTION_KILL_THREAD:   int = 0x00000000
+pub const ACTION_KILL:          int = 0x00000000   ;; alias for KILL_THREAD
+pub const ACTION_TRAP:          int = 0x00030000
+pub const ACTION_ERRNO:         int = 0x00050000
+pub const ACTION_USER_NOTIF:    int = 0x7fc00000
+pub const ACTION_TRACE:         int = 0x7ff00000
+pub const ACTION_LOG:           int = 0x7ffc0000
+pub const ACTION_ALLOW:         int = 0x7fff0000
+
+;; ── classic-BPF opcodes (pre-combined class|size/op|mode bytes) ─────────
+pub const OP_LD_W_ABS: int = 0x20   ;; BPF_LD  | BPF_W   | BPF_ABS
+pub const OP_JEQ_K:    int = 0x15   ;; BPF_JMP | BPF_JEQ | BPF_K
+pub const OP_JGT_K:    int = 0x25   ;; BPF_JMP | BPF_JGT | BPF_K
+pub const OP_JGE_K:    int = 0x35   ;; BPF_JMP | BPF_JGE | BPF_K
+pub const OP_JSET_K:   int = 0x45   ;; BPF_JMP | BPF_JSET| BPF_K
+pub const OP_JA:       int = 0x05   ;; BPF_JMP | BPF_JA  | BPF_K (k = unconditional jump length)
+pub const OP_ALU_AND_K: int = 0x54  ;; BPF_ALU | BPF_AND | BPF_K (A = A & k)
+pub const OP_RET_K:    int = 0x06   ;; BPF_RET | BPF_K
+
+;; ── SECCOMP_IOCTL_* — notification fd ioctl requests ────────────────────
+;; `_IOWR('!', 0, struct seccomp_notif)`      (struct is 80 bytes)
+;; `_IOWR('!', 1, struct seccomp_notif_resp)` (struct is 24 bytes)
+;; `_IOW ('!', 2, __u64)`
+pub const SECCOMP_IOCTL_NOTIF_RECV:     int = 0xC0502100
+pub const SECCOMP_IOCTL_NOTIF_SEND:     int = 0xC0182101
+pub const SECCOMP_IOCTL_NOTIF_ID_VALID: int = 0x40082102
+
+pub fn action_errno(err: int) -> int is
+    return ACTION_ERRNO | (err & 0xFFFF)
+end
+
+pub fn action_trace(msg: int) -> int is
+    return ACTION_TRACE | (msg & 0xFFFF)
+end
