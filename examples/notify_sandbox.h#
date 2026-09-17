@@ -1,0 +1,27 @@
+use "bytes -> libseccomp" from "seccomp"
+
+fn main() is
+    let mut rules: [seccomp::Rule] = seccomp::allow_baseline(seccomp::new_rules())
+    ;; hand `mount` decisions to us instead of allowing or killing outright.
+    let mount_nr: int = seccomp::number("mount")
+    rules.push(seccomp::Rule { nr: mount_nr, action: seccomp::ACTION_USER_NOTIF })
+
+    let fd: int = seccomp::install_notify(rules, seccomp::ACTION_KILL_PROCESS, seccomp::ARCH_X86_64)
+    if fd < 0 is
+        write("install_notify failed, errno=" + to_string(seccomp::last_errno()))
+        return
+    end
+
+    write("notify fd ready — waiting for the first mount() attempt...")
+    let n: seccomp::Notif = seccomp::notif_receive(fd)
+    write("pid " + to_string(n.pid) + " called mount(), denying with EPERM")
+
+    if seccomp::notif_id_valid(fd, n.id) is
+        ;; val=0, error=EPERM (the raw errno *value* — notif_respond
+        ;; passes it straight through to the kernel's own
+        ;; negative-errno convention).
+        seccomp::notif_respond(fd, n.id, 0, seccomp::EPERM, 0)
+    end
+
+    seccomp::close_notify(fd)
+end
