@@ -1,0 +1,37 @@
+use "bytes -> libseccomp" from "seccomp"
+
+fn main() is
+    let mut rules: [seccomp::Rule] = seccomp::new_rules()
+    rules = seccomp::allow_baseline(rules)
+
+    ;; outbound TCP/DNS essentials
+    rules = seccomp::allow(rules, "socket")
+    rules = seccomp::allow(rules, "connect")
+    rules = seccomp::allow(rules, "sendto")
+    rules = seccomp::allow(rules, "recvfrom")
+    rules = seccomp::allow(rules, "sendmsg")
+    rules = seccomp::allow(rules, "recvmsg")
+    rules = seccomp::allow(rules, "getsockopt")
+    rules = seccomp::allow(rules, "setsockopt")
+    rules = seccomp::allow(rules, "poll")
+    rules = seccomp::allow(rules, "select")
+    rules = seccomp::allow(rules, "epoll_create1")
+    rules = seccomp::allow(rules, "epoll_ctl")
+    rules = seccomp::allow(rules, "epoll_wait")
+
+    ;; explicitly refuse to ever become a server on this process
+    rules = seccomp::deny_errno(rules, "bind", 1)      ;; EPERM
+    rules = seccomp::deny_errno(rules, "listen", 1)    ;; EPERM
+    rules = seccomp::deny_errno(rules, "accept", 1)    ;; EPERM
+    rules = seccomp::deny_errno(rules, "accept4", 1)   ;; EPERM
+
+    ;; default: log-and-continue while you're still discovering what the
+    ;; workload needs; flip to seccomp::ACTION_KILL_PROCESS once you've
+    ;; watched a full run and the allow-list above is complete.
+    let ok: bool = seccomp::install(rules, seccomp::ACTION_LOG)
+    if !ok is
+        write("failed to install seccomp filter, errno=" + to_string(seccomp::last_errno()))
+    end
+
+    write("network sandbox active (log mode) — outbound only")
+end
