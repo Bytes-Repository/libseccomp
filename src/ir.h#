@@ -1,0 +1,64 @@
+pub struct Instr is
+    pub code:    int
+    pub jt:      int
+    pub jf:      int
+    pub k:       int
+    pub is_cond: bool
+    pub invert:  bool
+end
+
+;; A normal, non-branching instruction (LD, ALU, or a RET/JA with fixed,
+;; already-known jt/jf — jt/jf are meaningless to LD/ALU/RET and 0/0 for
+;; those; JA uses `k` as its jump length and ignores jt/jf too).
+pub fn plain(code: int, k: int) -> Instr is
+    return Instr { code: code, jt: 0, jf: 0, k: k, is_cond: false, invert: false }
+end
+
+;; A branch with fully-known, fixed jt/jf — used for the one-off
+;; arch-mismatch-kill pattern that isn't part of the uniform
+;; "fail = jump past the rest of this block" scheme.
+pub fn fixed(code: int, jt: int, jf: int, k: int) -> Instr is
+    return Instr { code: code, jt: jt, jf: jf, k: k, is_cond: false, invert: false }
+end
+
+;; Conditional placeholder: comparison TRUE keeps falling through
+;; (success), FALSE jumps forward by a distance patched in later by
+;; `patch_and_pack`.
+pub fn cond(code: int, k: int) -> Instr is
+    return Instr { code: code, jt: 0, jf: 0, k: k, is_cond: true, invert: false }
+end
+
+;; Conditional placeholder, inverted: comparison TRUE jumps forward
+;; (failure), FALSE keeps falling through (success) — used to encode
+;; `!=`/`<`/`<=` from BPF's native `==`/`>`/`>=` without a second
+;; comparison opcode.
+pub fn cond_inv(code: int, k: int) -> Instr is
+    return Instr { code: code, jt: 0, jf: 0, k: k, is_cond: true, invert: true }
+end
+
+;; Walk a self-contained block (one rule's worth of instructions, always
+;; ending in its own RET), patch every `is_cond` placeholder's forward
+;; jump to "distance to one past the end of this block" — i.e. exactly
+;; the start of whatever gets concatenated after it — and pack every
+;; instruction to its final `sock_filter`-layout 64-bit word
+;; (`pack_instr`, bpf.h#).
+pub fn patch_and_pack(blk: [Instr]) -> [int] is
+    let n: int = blk.len()
+    let mut out: [int] = []
+    let mut i: int = 0
+    while i < n is
+        let ins: Instr = blk[i]
+        if ins.is_cond is
+            let fail_dist: int = n - i - 1
+            if ins.invert is
+                out.push(pack_instr(ins.code, fail_dist, 0, ins.k))
+            else is
+                out.push(pack_instr(ins.code, 0, fail_dist, ins.k))
+            end
+        else is
+            out.push(pack_instr(ins.code, ins.jt, ins.jf, ins.k))
+        end
+        i += 1
+    end
+    return out
+end
