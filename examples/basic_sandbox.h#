@@ -1,0 +1,22 @@
+use "bytes -> libseccomp" from "seccomp"
+
+fn main() is
+    let mut rules: [seccomp::Rule] = seccomp::new_rules()
+    rules = seccomp::allow_baseline(rules)
+    rules = seccomp::allow(rules, "openat")   ;; already in baseline, harmless dupe
+    rules = seccomp::deny_errno(rules, "ptrace", 1)   ;; EPERM instead of a hard kill
+
+    let ok: bool = seccomp::install(rules, seccomp::ACTION_KILL_PROCESS)
+    if ok is
+        write("seccomp filter installed — only the baseline syscalls are allowed now")
+    else is
+        write("failed to install seccomp filter, errno=" + to_string(seccomp::last_errno()))
+    end
+
+    ;; Allowed: write() is in the baseline set.
+    write("still alive after install")
+
+    ;; Try something NOT in the allow-list — e.g. uncommenting a call to
+    ;; `mkdir`/`socket` here (neither is in `allow_baseline`) will kill
+    ;; this process immediately once the filter above is active.
+end
