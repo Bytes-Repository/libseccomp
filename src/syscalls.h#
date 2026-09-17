@@ -1,0 +1,15 @@
+pub fn number(name: string) -> int is
+    return number_x86_64(name)
+end
+
+;; Architecture-aware lookup. Unknown `arch` values fall back to the
+;; x86_64 table (the common default) rather than silently returning -1
+;; for every name, since a caller who forgot to pass a real ARCH_*
+;; constant almost certainly wanted the default table, not "nothing
+;; resolves".
+pub fn number_for_arch(name: string, arch: int) -> int is
+    if arch == ARCH_AARCH64 is
+        return number_aarch64(name)
+    end
+    return number_x86_64(name)
+end
