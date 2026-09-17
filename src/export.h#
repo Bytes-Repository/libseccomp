@@ -1,0 +1,94 @@
+use "std -> conv" from "conv"
+
+;; A compact, round-trippable text form of a built program: one
+;; lowercase-hex word per instruction, space-separated. Every packed
+;; instruction (`bpf::pack_instr`'s output) is a full 64-bit
+;; `sock_filter`, encoded exactly as-is — `import_hex` is the exact
+;; inverse.
+pub fn export_hex(prog: [int]) -> string is
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < prog.len() is
+        if i > 0 is
+            out = out + " "
+        end
+        out = out + conv::int_to_hex(prog[i])
+        i += 1
+    end
+    return out
+end
+
+pub fn import_hex(s: string) -> [int] is
+    let mut out: [int] = []
+    let mut cur: string = ""
+    let mut i: int = 0
+    while i < s.len() is
+        let ch: string = s[i..i + 1]
+        if ch == " " is
+            if cur.len() > 0 is
+                out.push(conv::hex_to_int(cur))
+                cur = ""
+            end
+        else is
+            cur = cur + ch
+        end
+        i += 1
+    end
+    if cur.len() > 0 is
+        out.push(conv::hex_to_int(cur))
+    end
+    return out
+end
+
+;; ── human-readable disassembly ("pfc"-style, like libseccomp's own
+;; ── SCMP_FLTATR debug dump) — for eyeballing what a filter actually
+;; ── does before installing it. ────────────────────────────────────────
+fn op_name(code: int) -> string is
+    if code == OP_LD_W_ABS  is return "ld"    end
+    if code == OP_JEQ_K     is return "jeq"   end
+    if code == OP_JGT_K     is return "jgt"   end
+    if code == OP_JGE_K     is return "jge"   end
+    if code == OP_JSET_K    is return "jset"  end
+    if code == OP_JA        is return "ja"    end
+    if code == OP_ALU_AND_K is return "and"   end
+    if code == OP_RET_K     is return "ret"   end
+    return "unknown"
+end
+
+;; Unpack one unsigned field back out of `pack_instr`'s 64-bit word —
+;; the inverse of that function's own `c | (a<<16) | (b<<24) | (kk<<32)`
+;; packing.
+fn unpack_code(word: int) -> int is return word & 0xFFFF end
+fn unpack_jt(word: int)   -> int is return (word >> 16) & 0xFF end
+fn unpack_jf(word: int)   -> int is return (word >> 24) & 0xFF end
+;; NOTE: this shifts a full 64-bit word right by 32 — correct for
+;; *unsigned* extraction, but H#'s `>>` is (like most languages') an
+;; arithmetic shift on a signed `int`, so for a word whose top bit is
+;; set (any instruction with a `k` >= 0x80000000, e.g. a `RET
+;; ACTION_KILL_PROCESS`) this sign-extends instead of zero-filling,
+;; leaving the high bits of the result set to 1 instead of 0. Masking
+;; with `& 0xFFFFFFFF` immediately after throws those away and leaves
+;; only the genuine low 32 bits of `k` — correct either way, just worth
+;; knowing why the mask is load-bearing here and not just defensive
+;; style.
+fn unpack_k(word: int) -> int is return (word >> 32) & 0xFFFFFFFF end
+
+pub fn export_pfc(prog: [int]) -> string is
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < prog.len() is
+        let word: int = prog[i]
+        let code: int = unpack_code(word)
+        let jt:   int = unpack_jt(word)
+        let jf:   int = unpack_jf(word)
+        let k:    int = unpack_k(word)
+        let line: string =
+            to_string(i) + ": " + op_name(code) +
+            " k=" + conv::int_to_hex(k) +
+            " jt=" + to_string(jt) +
+            " jf=" + to_string(jf) + "\n"
+        out = out + line
+        i += 1
+    end
+    return out
+end
